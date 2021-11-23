@@ -1,0 +1,2 @@
+rootProject.name='Wland2d'
+include ':app'

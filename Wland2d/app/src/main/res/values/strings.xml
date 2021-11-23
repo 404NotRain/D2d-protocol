@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Wland2d</string>
+    <string name="prompt">
+        Wland2d, a benchmark app for paper \"Anonymity and Secure Data Transmission Scheme with Trajectory Tracking in D2D Communication\".\n
+        Usage: Select your identity(S/I/T) from spinner, then press button \"GO!\" to execute the protocol.\n
+        Result: The total communication overhead are logged.
+    </string>
+</resources>
