@@ -1,7 +1,19 @@
-import com.google.common.primitives.Bytes;
-import com.google.common.io.BaseEncoding;
+package xidian.sce.watchmen;
 
-import java.io.*;
+import android.content.Context;
+import android.os.Bundle;
+import android.view.View;
+import android.widget.Spinner;
+
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.google.common.io.BaseEncoding;
+import com.google.common.primitives.Bytes;
+
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.math.BigInteger;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -10,8 +22,6 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
 import java.util.Arrays;
-import java.util.Scanner;
-import java.util.logging.Logger;
 
 import javax.crypto.Cipher;
 import javax.crypto.Mac;
@@ -22,58 +32,115 @@ import it.unisa.dia.gas.jpbc.Element;
 import it.unisa.dia.gas.jpbc.Field;
 import it.unisa.dia.gas.jpbc.Pairing;
 import it.unisa.dia.gas.plaf.jpbc.pairing.PairingFactory;
+import xidian.sce.watchmen.logger.Log;
+import xidian.sce.watchmen.logger.LogFragment;
+import xidian.sce.watchmen.logger.LogWrapper;
+import xidian.sce.watchmen.logger.MessageOnlyLogFilter;
 
 
-public class D2d {
-    static final Logger logger = Logger.getLogger(D2d.class.getName());
+public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "MainActivity";
+
     private static byte[] IDs = "SSSSSSSSSSSSSSSS".getBytes();
     private static byte[] IDr = "RRRRRRRRRRRRRRRR".getBytes();
     private static byte[] IDt = "TTTTTTTTTTTTTTTT".getBytes();
-    private static byte[] Kold = "oldkoldkoldkoldk".getBytes();
+    private static byte[] Kold = "oldkoldkoldkoldk".getBytes(); // shared key between source and target
     private static byte[] Kold2 = "kdlokdlokdlokdlo".getBytes(); // shared key between relay and target
-    private static final String AMF_IP = "127.0.0.1";
+
+    private static final String AMF_IP = "192.168.0.103";
     private static final int AMF_PORT = 40000;
     private static Socket socket;
+
     private static Pairing pairing;
     private static Field z;
     private IvParameterSpec ivspec = new IvParameterSpec(new byte[16]);
+    private static Element us, ur, ut;
 
-    private static int targetMode = 0;
+    private Thread worker = null;
+    private int relayMode = 0, sourceMode = 0, targetMode = 0;
+    private String packetFile = "packet.txt";
 
-    public D2d() {
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        initializeLogging();
+
         //TypeACurveGenerator pg = new TypeACurveGenerator(128, 512);
         //PairingParameters typeAParams = pg.generate();
         //Pairing pairing = PairingFactory.getPairing(typeAParams);
 
         PairingFactory.getInstance().setUsePBCWhenPossible(true);
-        pairing = PairingFactory.getPairing("a128.properties");
+        pairing = PairingFactory.getPairing("assets/a128.properties");
         z = pairing.getZr();
+
+        /*us = z.newRandomElement().getImmutable();
+        ur = z.newRandomElement().getImmutable();
+        ut = z.newRandomElement().getImmutable();*/
+
+        us = z.newElement(451354322).getImmutable();  //source's main key
+        ur = z.newElement(165486784).getImmutable();
+        ut = z.newElement(165465798).getImmutable();
     }
 
-    public static void main(String[] args) throws Exception {
-        D2d d2d = new D2d();
-        d2d.go();
+    public void go(View v) {
+        Spinner spinner = findViewById(R.id.spinner_identity);
+        String identity = spinner.getSelectedItem().toString();
+        getWorker(identity);
+        worker.start();
     }
 
-    public void go() throws IOException {
-        System.out.print("Input your identity(S/R/T/O):");
-        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-        String identity = reader.readLine();
+    public void initializeLogging() {
+        LogWrapper logWrapper = new LogWrapper();
+        Log.setLogNode(logWrapper);
+
+        MessageOnlyLogFilter msgFilter = new MessageOnlyLogFilter();
+        logWrapper.setNext(msgFilter);
+
+        LogFragment logFragment = (LogFragment) getSupportFragmentManager()
+                .findFragmentById(R.id.log_fragment);
+        msgFilter.setNext(logFragment.getLogView());
+    }
+
+    public void getWorker(String identity) {
+        if(worker != null) {
+            worker.interrupt();
+        }
         switch (identity) {
-            case "S" :
-                (new SourceWorker()).start();
+            case "Source" :
+                worker = new SourceWorker();
                 break;
-            case "R":
-                (new RelayWorker()).start();
+            case "Relay":
+                worker = new RelayWorker();
                 break;
-            case "T":
-                (new TargetWorker()).start();
+            case "Target":
+                worker = new TargetWorker();
                 break;
-            case "O":
-                (new OverheadWorker()).start();
+            case "Mitm" :
+                relayMode = 1;
+                worker = new RelayWorker();
+                break;
+            case "Capture":
+                relayMode = 2;
+                worker = new RelayWorker();
+                break;
+            case "ReplayS":
+                sourceMode = 1;
+                worker = new SourceWorker();
+                break;
+            case "ReplayR":
+                relayMode = 3;
+                worker = new RelayWorker();
+                break;
+            case "ReplayT":
+                targetMode = 1;
+                worker = new TargetWorker();
+                break;
+            case "Overhead":
+                worker = new OverheadWorker();
                 break;
             default:
-                logger.info("identity error");
+                Log.d(TAG,"identity error");
         }
     }
 
@@ -81,11 +148,9 @@ public class D2d {
         static final String TAG = "SourceWorker";
         public void run() {
             int num;
-            Element us = z.newRandomElement().getImmutable(),
-                    cvalue = z.newRandomElement().getImmutable(),
-                    count,
-                    Tgn, n;
-            logger.info( "You are UEs");
+            Element cvalue = z.newRandomElement().getImmutable(),
+                    count, Tgn, n;
+            Log.i(TAG, "You are UEs");
 
             byte[] t1 = new byte[16], t2 = new byte[16];
             byte[] m = "hello,world!".getBytes(); //the plain message
@@ -98,13 +163,19 @@ public class D2d {
                 InputStream input = socket.getInputStream();
                 output.write("S".getBytes());
 
+                if( sourceMode == 1 ){
+                    IDs = IDr;
+                    us = ur;
+                    Kold = Kold2;
+                }
+
                 //long start = System.nanoTime();
                 new SecureRandom().nextBytes(t1);
                 output.write(Bytes.concat(IDs, IDt, t1));
 
                 num = input.read(buffer);
                 if (num != 48) {
-                    logger.info( "error => sid n Tg(n)");
+                    Log.i(TAG, "error => sid n Tg(n)");
                     return;
                 }
                 byte[] sid = Arrays.copyOfRange(buffer, 0, 16);
@@ -113,7 +184,7 @@ public class D2d {
                 Element Tus_n = T(us, n);
 
                 output.write(Bytes.concat(sid, Tus_n.toBytes()));
-                logger.info( "step1 finished");
+                Log.i(TAG,  "step1 finished");
 
                 //2. data transmit
                 long start = System.nanoTime();
@@ -128,7 +199,7 @@ public class D2d {
                 Cipher cipher = Cipher.getInstance("AES/CFB8/NoPadding");
                 cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Knew, "AES"), ivspec);
                 byte[] beta = cipher.doFinal(t2);
-                logger.info( String.format("Knew => %s", BaseEncoding.base16().lowerCase().encode(Knew)) );
+                Log.i(TAG,  String.format("Knew => %s", BaseEncoding.base16().lowerCase().encode(Knew)) );
 
                 byte[] TS = ByteBuffer.allocate(4).putInt((int) (System.currentTimeMillis() / 1000)).array();
 
@@ -153,20 +224,28 @@ public class D2d {
                 byte[] delta_T = mac.doFinal((Bytes.concat(sid, TID, CID, count.toBytes(), data, R1)));
                 byte[] msg = Bytes.concat(sid, TID, CID, count.toBytes(), data, R1, delta_T);
 
+                if( sourceMode == 1 ){
+                    FileInputStream fis = openFileInput(packetFile);
+                    //byte[] packet =   new byte[(int) fis.getChannel().size()];
+                    fis.read(msg);
+                }
+
+                Log.i(TAG,  "step2 finished ");
+                long end = System.nanoTime();
+                double t = (end-start)/1e6;
+                Log.i(TAG,  String.format("send cipher data => %s", BaseEncoding.base16().lowerCase().encode(msg)) );
+                Log.i(TAG, String.format("Source runtime => %sms", t));
+
                 DatagramSocket udp_socket = new DatagramSocket();
                 udp_socket.setBroadcast(true);
                 for(int i = 0; i < 1000; i++)
                     udp_socket.send(new DatagramPacket(msg, msg.length, InetAddress.getByName("255.255.255.255"), 4001));
-                logger.info( "step2 finished ");
-                long end = System.nanoTime();
-                double t = (end-start)/1e6;
-                logger.info( String.format("send cipher data => %s", BaseEncoding.base16().lowerCase().encode(msg)) );
-                logger.info(String.format("Source runtime => %sms", t));
+
 
                 //3. session confirm
                 num = input.read(buffer);
                 if (num != 32) {
-                    logger.info( "error => sid delta_c)");
+                    Log.i(TAG,  "error => sid delta_c)");
                     return;
                 }
                 byte[] delta_ct = Arrays.copyOfRange(buffer, 16, 32);
@@ -174,16 +253,16 @@ public class D2d {
                 byte[] delta_c = mac.doFinal(sid);
 
                 if(!Arrays.equals(delta_c, delta_ct)) {
-                    logger.info( "not matched delta_c");
+                    Log.i(TAG,  "not matched delta_c");
                     return;
                 }
-                logger.info( "step3 finished");
+                Log.i(TAG,  "step3 finished");
                 //long end = System.nanoTime();
                 //double t = (end-start)/1e6;
-                //logger.info(String.format("Total time for protocol => %sms", t));
+                //Log.i(String.format("Total time for protocol => %sms", t));
 
             } catch (Exception e) {
-                logger.info( e.toString());
+                Log.i(TAG,  e.toString());
                 return;
             }
         }
@@ -192,16 +271,11 @@ public class D2d {
     class RelayWorker extends Thread {
         static final String TAG = "RelayWorker";
         public void run() {
-            int num, mode = 0;
+            int num;
             byte[] buffer = new byte[2048];
-            Element ui = z.newRandomElement().getImmutable(),
-                    Tgn, n;
+            Element Tgn, n;
             DatagramSocket serverSocket = null;
-            logger.info( "You are UER");
-
-            System.out.println("select mode(normal/0, modify attack/1):");
-            Scanner sc = new Scanner(System.in);
-            mode = sc.nextInt();
+            Log.i(TAG,  "You are UER");
 
             try {
                 //1. session config
@@ -210,19 +284,23 @@ public class D2d {
                 InputStream input = socket.getInputStream();
                 output.write("R".getBytes());
 
+                if( relayMode == 3 ){
+                    ur = us;
+                }
+
                 num = input.read(buffer);
                 if (num != 48) {
-                    logger.info( "error => sid n Tg(n)");
+                    Log.i(TAG,  "error => sid n Tg(n)");
                     return;
                 }
                 byte[] sid = Arrays.copyOfRange(buffer, 0, 16);
                 n = z.newElementFromBytes(Arrays.copyOfRange(buffer, 16, 32)).getImmutable();
                 Tgn = z.newElementFromBytes(Arrays.copyOfRange(buffer, 32, 48)).getImmutable();
 
-                Element Tui_n = T(ui, n);
+                Element Tur_n = T(ur, n);
 
-                output.write(Bytes.concat(sid, Tui_n.toBytes()));
-                logger.info( "step1 finished");
+                output.write(Bytes.concat(sid, Tur_n.toBytes()));
+                Log.i(TAG,  "step1 finished");
 
                 //2. data transmit
                 serverSocket = new DatagramSocket(4001);
@@ -230,7 +308,13 @@ public class D2d {
                 DatagramPacket receivePacket = new DatagramPacket(buffer,buffer.length);
                 serverSocket.receive(receivePacket);
                 int packetLength = receivePacket.getLength();
-                logger.info( String.format("Receive cipher data => %s", BaseEncoding.base16().lowerCase().encode(Arrays.copyOfRange(buffer, 0, packetLength))) );
+                Log.i(TAG,  String.format("Receive cipher data => %s", BaseEncoding.base16().lowerCase().encode(Arrays.copyOfRange(buffer, 0, packetLength))) );
+
+                if( relayMode == 2 ){
+                    try (FileOutputStream fos = openFileOutput(packetFile, Context.MODE_PRIVATE)) {
+                        fos.write(Arrays.copyOfRange(buffer, 0, packetLength));
+                    }
+                }
 
                 long start = System.nanoTime();
                 byte[] sid_s = Arrays.copyOfRange(buffer, 0, 16);
@@ -245,12 +329,12 @@ public class D2d {
                 byte[] delta_Ts = Arrays.copyOfRange(buffer, packetLength-16,
                         packetLength);
 
-                if( mode == 1 ){ // relay modify attack
+                if( relayMode == 1 ){ // relay modify attack
                     data[0] = (byte)(data[0] ^ 1);
                 }
 
                 if(!Arrays.equals(sid, sid_s)) {
-                    logger.info( "not matched sid");
+                    Log.i(TAG,  "not matched sid");
                     return;
                 }
 
@@ -258,18 +342,18 @@ public class D2d {
                 mac.init(new SecretKeySpec(n.toBytes(), "RawBytes"));
                 byte[] delta_Ti = mac.doFinal(Arrays.copyOfRange(buffer, 0, packetLength - 16));
                 if(!Arrays.equals(delta_Ti, delta_Ts)) {
-                    logger.info( "not matched delta t");
+                    Log.i(TAG,  "not matched delta t");
                     return;
                 }
 
 
-                byte[] r2 = Tui_n.toBytes();
+                byte[] r2 = Tur_n.toBytes();
                 Cipher cipher = Cipher.getInstance("AES/CFB8/NoPadding");
-                Element Tui_tgn = T(ui, Tgn);
+                Element Tur_tgn = T(ur, Tgn);
 
-                cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Tui_tgn.toBytes(), "AES"), ivspec);
+                cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Tur_tgn.toBytes(), "AES"), ivspec);
                 byte[] e2 =  cipher.doFinal(Arrays.copyOfRange(R1_s, 16, 32));
-                mac.init(new SecretKeySpec(Tui_tgn.toBytes(), "RawBytes"));
+                mac.init(new SecretKeySpec(Tur_tgn.toBytes(), "RawBytes"));
                 byte[] delta_2 = mac.doFinal(Bytes.concat(r2, e2));
                 byte[] R2 = Bytes.concat(r2, e2, delta_2);
 
@@ -278,19 +362,19 @@ public class D2d {
                 byte[] delta_T = mac.doFinal((Bytes.concat(sid_s, TID_s, CID_s, count.toBytes(), data, R)));
                 byte[] msg = Bytes.concat(sid_s, TID_s, CID_s, count.toBytes(), data, R, delta_T);
 
+                Log.i(TAG,  "step2 finished");
+                long end = System.nanoTime();
+                double t = (end - start)/1e6;
+                Log.i(TAG,  String.format("resend cipher data => %s", BaseEncoding.base16().lowerCase().encode(msg)) );
+                Log.i(TAG, String.format("Relay runtime => %sms", t));
+
                 DatagramSocket udp_socket = new DatagramSocket();
                 udp_socket.setBroadcast(true);
                 for(int i = 0; i < 1000; i++)
                     udp_socket.send(new DatagramPacket(msg, msg.length, InetAddress.getByName("255.255.255.255"), 4002));
-                logger.info( "step2 finished");
-
-                long end = System.nanoTime();
-                double t = (end - start)/1e6;
-                logger.info( String.format("resend cipher data => %s", BaseEncoding.base16().lowerCase().encode(msg)) );
-                logger.info(String.format("Relay runtime => %sms", t));
 
             } catch (Exception e) {
-                logger.info( e.toString());
+                Log.i(TAG,  e.toString());
             }
             finally {
                 if(serverSocket != null) {
@@ -305,10 +389,9 @@ public class D2d {
         public void run() {
             int num;
             byte[] buffer = new byte[2048];
-            Element ut = z.newRandomElement().getImmutable(),
-                    Tgn, n;
+            Element Tgn, n;
             DatagramSocket serverSocket = null;
-            logger.info( "You are UEt");
+            Log.i(TAG,  "You are UEt");
 
             try {
                 //1. session config
@@ -324,7 +407,7 @@ public class D2d {
 
                 num = input.read(buffer);
                 if (num != 80) {
-                    logger.info( "error => sid n Tg(n) IDs t1");
+                    Log.i(TAG,  "error => sid n Tg(n) IDs t1");
                     return;
                 }
 
@@ -333,7 +416,7 @@ public class D2d {
                 Tgn = z.newElementFromBytes(Arrays.copyOfRange(buffer, 32, 48)).getImmutable();
                 //byte[] IDs = Arrays.copyOfRange(buffer, 48, 64);
                 byte[] t1 = Arrays.copyOfRange(buffer, 64, 80);
-                logger.info( "step1 finished");
+                Log.i(TAG,  "step1 finished");
 
 
                 //2. data transmit
@@ -342,7 +425,7 @@ public class D2d {
                 DatagramPacket receivePacket = new DatagramPacket(buffer,buffer.length);
                 serverSocket.receive(receivePacket);
                 int packetLength = receivePacket.getLength();
-                logger.info( String.format("Receive cipher data => %s", BaseEncoding.base16().lowerCase().encode(Arrays.copyOfRange(buffer, 0, packetLength))) );
+                Log.i(TAG,  String.format("Receive cipher data => %s", BaseEncoding.base16().lowerCase().encode(Arrays.copyOfRange(buffer, 0, packetLength))) );
 
                 long start = System.nanoTime();
                 byte[] sid_s = Arrays.copyOfRange(buffer, 0, 16);
@@ -357,7 +440,7 @@ public class D2d {
                         packetLength);
 
                 if(!Arrays.equals(sid, sid_s)) {
-                    logger.info( "not matched sid");
+                    Log.i(TAG,  "not matched sid");
                     return;
                 }
 
@@ -365,20 +448,20 @@ public class D2d {
                 mac.init(new SecretKeySpec(n.toBytes(), "RawBytes"));
                 byte[] delta_Tt = mac.doFinal(Arrays.copyOfRange(buffer, 0, packetLength - 16));
                 if(!Arrays.equals(delta_Tt, delta_Ts)) {
-                    logger.info( "not matched delta t");
+                    Log.i(TAG,  "not matched delta t");
                     return;
                 }
 
                 byte[] IDs_t = byteArrayXor(TID_s, IDt, 16);
                 IDs_t = byteArrayXor(IDs_t, n.toBytes(), 16);
                 if(!Arrays.equals(IDs_t, IDs)) {
-                    logger.info( "not matched IDs");
+                    Log.i(TAG,  "not matched IDs");
                     return;
                 }
 
                 Element cvalue = z.newElementFromBytes(byteArrayXor(CID_s, IDs, 16));
                 if(! count.sub(cvalue).isEqual(z.newElement(R1_s.length / 48))) {
-                    logger.info( "not matched track length");
+                    Log.i(TAG,  "not matched track length");
                     return;
                 }
 
@@ -386,7 +469,7 @@ public class D2d {
                 mac.init(new SecretKeySpec(Kold, "RawBytes"));
                 byte[] delta_mt = mac.doFinal(Bytes.concat(sid_s, TID_s, EM));
                 if(!Arrays.equals(delta_mt, Arrays.copyOfRange(data,  data.length-16, data.length))) {
-                    logger.info( "not matched delta_m");
+                    Log.i(TAG,  "not matched delta_m");
                     return;
                 }
 
@@ -399,7 +482,7 @@ public class D2d {
                 //byte[] m_t = Arrays.copyOfRange(DM, 36, DM.length-16);
                 byte[] beta_t = Arrays.copyOfRange(DM, DM.length-16, DM.length);
                 if(!Arrays.equals(t1_t, t1)) {
-                    logger.info( "not matched t1");
+                    Log.i(TAG,  "not matched t1");
                     return;
                 }
 
@@ -407,23 +490,23 @@ public class D2d {
                 cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Knew, "AES"), ivspec);
                 byte[] beta_tt =  cipher.doFinal(t2_t);
                 if(!Arrays.equals(beta_tt, beta_t)) {
-                    logger.info( "not matched beta");
+                    Log.i(TAG,  "not matched beta");
                     return;
                 }
-                logger.info( String.format("Knew => %s", BaseEncoding.base16().lowerCase().encode(Knew)) );
-                logger.info( "step2 finished");
+                Log.i(TAG,  String.format("Knew => %s", BaseEncoding.base16().lowerCase().encode(Knew)) );
+                Log.i(TAG,  "step2 finished");
 
                 //3. session confirm
                 mac.init(new SecretKeySpec(Knew, "RawBytes"));
                 byte[] delta_c = mac.doFinal(sid);
                 output.write(Bytes.concat(sid, delta_c, R1_s));
-                logger.info( "step3 finished");
+                Log.i(TAG,  "step3 finished");
                 long end = System.nanoTime();
                 double t = (end - start)/1e6;
-                logger.info(String.format("Target runtime => %sms", t));
+                Log.i(TAG, String.format("Target runtime => %sms", t));
 
             } catch (Exception e) {
-                logger.info( e.toString());
+                Log.i(TAG,  e.toString());
             }
             finally {
                 if(serverSocket != null) {
@@ -456,7 +539,7 @@ public class D2d {
             }
             end = System.nanoTime();
             t = (end - start) / 1e6 / times;
-            logger.info(String.format("Average pairing time => %sms", t));
+            Log.i(TAG, String.format("Average pairing time => %sms", t));
 
             x = z.newRandomElement().getImmutable();
             y = z.newRandomElement().getImmutable();
@@ -466,7 +549,7 @@ public class D2d {
             }
             end = System.nanoTime();
             t = (end - start) / 1e6 / times;
-            logger.info(String.format("Average mul time => %sms", t));
+            Log.i(TAG, String.format("Average mul time => %sms", t));
 
             start = System.nanoTime();
             for (i = 0; i < times; i++) {
@@ -474,7 +557,7 @@ public class D2d {
             }
             end = System.nanoTime();
             t = (end - start) / 1e6 / times;
-            logger.info(String.format("Average exp time => %sms", t));
+            Log.i(TAG, String.format("Average exp time => %sms", t));
 
             start = System.nanoTime();
             for (i = 0; i < times; i++) {
@@ -482,7 +565,7 @@ public class D2d {
             }
             end = System.nanoTime();
             t = (end - start) / 1e6 / times;
-            logger.info(String.format("Average hash time => %sms", t));
+            Log.i(TAG, String.format("Average hash time => %sms", t));
 
             try {
                 Mac mac = Mac.getInstance("HmacMD5");
@@ -493,7 +576,7 @@ public class D2d {
                 }
                 end = System.nanoTime();
                 t = (end - start) / 1e6 / times;
-                logger.info(String.format("Average hmac time => %sms", t));
+                Log.i(TAG, String.format("Average hmac time => %sms", t));
 
 
                 Cipher cipher = Cipher.getInstance("AES/CFB8/NoPadding");
@@ -504,9 +587,9 @@ public class D2d {
                 }
                 end = System.nanoTime();
                 t = (end - start) / 1e6 / times;
-                logger.info(String.format("Average encrypt time => %sms", t));
+                Log.i(TAG, String.format("Average encrypt time => %sms", t));
             } catch (Exception e) {
-                logger.info(e.toString());
+                Log.i(TAG, e.toString());
             }
         }
     }
@@ -527,7 +610,7 @@ public class D2d {
         return Ap[0][0].mul(z.newOneElement()).add(Ap[0][1].mul(x));
     }
 
-    private static Element[][] matmul(Element m1[][], Element m2[][]) {
+    private static Element[][] matmul(Element[][] m1, Element[][] m2) {
         Element[][] result = new Element[2][2];
         for(int i = 0; i < 2; i++)
             for(int j = 0; j < 2; j++){
@@ -545,5 +628,4 @@ public class D2d {
     }
 
 }
-
 

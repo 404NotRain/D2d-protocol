@@ -17,7 +17,7 @@ import java.util.logging.Logger;
 public class Amf {
     static final Logger logger = Logger.getLogger(Amf.class.getName());
 
-	private final int PORT = 4000;
+	private final int PORT = 40000;
 	private final ServerSocket serverSocket;
 	private final Map<String, Socket> socketMaps;
 	private Element g;
@@ -62,7 +62,7 @@ public class Amf {
 			logger.log(Level.INFO, () ->
 					String.format("Receive a hello from => %s", new String(buffer, 0, 1)));
 
-			if (socketMaps.containsKey("S") && socketMaps.containsKey("I") && //) {
+			if (socketMaps.containsKey("S") && socketMaps.containsKey("R") && //) {
 					socketMaps.containsKey("T")) {
 				break;
 			}
@@ -92,10 +92,10 @@ public class Amf {
 			return;
 		}
 
-		socketMaps.get("I").getOutputStream().write(Bytes.concat(sid, n.toBytes(),
+		socketMaps.get("R").getOutputStream().write(Bytes.concat(sid, n.toBytes(),
 				Tg_n.toBytes()));
-		logger.log(Level.INFO, () -> "Write secret to InterWorker");
-		count = socketMaps.get("I").getInputStream().read(buffer);
+		logger.log(Level.INFO, () -> "Write secret to RelayWorker");
+		count = socketMaps.get("R").getInputStream().read(buffer);
 		if (count != 32) {
             logger.log(Level.WARNING ,"Step 4.2 failed");
 			return;
@@ -112,7 +112,7 @@ public class Amf {
 	}
 
 	private Element T(Element p, Element x) {
-		long start = System.nanoTime();
+		//long start = System.nanoTime();
 
 		Element[][] A =  { {z.newZeroElement().getImmutable(), z.newOneElement().getImmutable()},
 				{z.newOneElement().negate().getImmutable(), x.mul(2).getImmutable()}};
@@ -126,10 +126,9 @@ public class Amf {
 				Ap = matmul(Ap, A);
 			}
 		}
-		long end = System.nanoTime();
-		double t = (end-start)/1e6;
-		logger.severe( String.format("Test time for T(%s, %s) => %sms",
-				p, x, t));
+		//long end = System.nanoTime();
+		//double t = (end-start)/1e6;
+		//logger.info( String.format("Test time for T(%s, %s) => %sms", p, x, t));
 		return Ap[0][0].mul(z.newOneElement()).add(Ap[0][1].mul(x));
 	}
 

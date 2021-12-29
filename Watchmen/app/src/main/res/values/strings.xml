@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Watchmen</string>
+    <string name="prompt">
+        Usage: Select the identity  from spinner, then press button \"GO!\" to execute the protocol. The identities include the following: \n
+        1.Source\n
+        2.Relay\n
+        3.Target\n
+        4.Mitm\n
+        5.Capture\n
+        6.ReplayS\n
+        7.ReplayR\n
+        8.ReplayT\n
+        9.Overhead
+    </string>
+</resources>

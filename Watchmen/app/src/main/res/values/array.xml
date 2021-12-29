@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="Identity">
+        <item>Source</item>
+        <item>Relay</item>
+        <item>Target</item>
+        <item>Mitm</item>
+        <item>Capture</item>
+        <item>ReplayS</item>
+        <item>ReplayR</item>
+        <item>ReplayT</item>
+        <item>Overhead</item>
+    </string-array>
+</resources>
