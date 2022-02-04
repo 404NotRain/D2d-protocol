@@ -1,6 +1,14 @@
-import com.google.common.primitives.Bytes;
 import com.google.common.io.BaseEncoding;
+import com.google.common.primitives.Bytes;
+import it.unisa.dia.gas.jpbc.Element;
+import it.unisa.dia.gas.jpbc.Field;
+import it.unisa.dia.gas.jpbc.Pairing;
+import it.unisa.dia.gas.plaf.jpbc.pairing.PairingFactory;
 
+import javax.crypto.Cipher;
+import javax.crypto.Mac;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.math.BigInteger;
 import java.net.DatagramPacket;
@@ -10,18 +18,7 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
 import java.util.Arrays;
-import java.util.Scanner;
 import java.util.logging.Logger;
-
-import javax.crypto.Cipher;
-import javax.crypto.Mac;
-import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
-
-import it.unisa.dia.gas.jpbc.Element;
-import it.unisa.dia.gas.jpbc.Field;
-import it.unisa.dia.gas.jpbc.Pairing;
-import it.unisa.dia.gas.plaf.jpbc.pairing.PairingFactory;
 
 
 public class D2d {
@@ -32,7 +29,7 @@ public class D2d {
     private static byte[] Kold = "oldkoldkoldkoldk".getBytes();
     private static byte[] Kold2 = "kdlokdlokdlokdlo".getBytes(); // shared key between relay and target
     private static final String AMF_IP = "127.0.0.1";
-    private static final int AMF_PORT = 40000;
+    private static final int AMF_PORT = 4000;
     private static Socket socket;
     private static Pairing pairing;
     private static Field z;
@@ -41,7 +38,7 @@ public class D2d {
     private static int targetMode = 0;
 
     public D2d() {
-        //TypeACurveGenerator pg = new TypeACurveGenerator(128, 512);
+        //TypeACurveGenerator pg = new TypeACurveGenerator(128, 256);
         //PairingParameters typeAParams = pg.generate();
         //Pairing pairing = PairingFactory.getPairing(typeAParams);
 
@@ -199,10 +196,6 @@ public class D2d {
             DatagramSocket serverSocket = null;
             logger.info( "You are UER");
 
-            System.out.println("select mode(normal/0, modify attack/1):");
-            Scanner sc = new Scanner(System.in);
-            mode = sc.nextInt();
-
             try {
                 //1. session config
                 socket = new Socket(AMF_IP, AMF_PORT);
@@ -226,7 +219,7 @@ public class D2d {
 
                 //2. data transmit
                 serverSocket = new DatagramSocket(4001);
-                serverSocket.setSoTimeout(4000);
+                serverSocket.setSoTimeout(40000);
                 DatagramPacket receivePacket = new DatagramPacket(buffer,buffer.length);
                 serverSocket.receive(receivePacket);
                 int packetLength = receivePacket.getLength();
@@ -338,7 +331,7 @@ public class D2d {
 
                 //2. data transmit
                 serverSocket = new DatagramSocket(4002);
-                serverSocket.setSoTimeout(4000);
+                serverSocket.setSoTimeout(40000);
                 DatagramPacket receivePacket = new DatagramPacket(buffer,buffer.length);
                 serverSocket.receive(receivePacket);
                 int packetLength = receivePacket.getLength();

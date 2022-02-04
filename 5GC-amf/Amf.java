@@ -2,7 +2,9 @@ import com.google.common.primitives.Bytes;
 import it.unisa.dia.gas.jpbc.Element;
 import it.unisa.dia.gas.jpbc.Field;
 import it.unisa.dia.gas.jpbc.Pairing;
+import it.unisa.dia.gas.jpbc.PairingParameters;
 import it.unisa.dia.gas.plaf.jpbc.pairing.PairingFactory;
+import it.unisa.dia.gas.plaf.jpbc.pairing.a.TypeACurveGenerator;
 
 import java.math.BigInteger;
 import java.net.ServerSocket;
@@ -17,7 +19,7 @@ import java.util.logging.Logger;
 public class Amf {
     static final Logger logger = Logger.getLogger(Amf.class.getName());
 
-	private final int PORT = 40000;
+	private final int PORT = 4000;
 	private final ServerSocket serverSocket;
 	private final Map<String, Socket> socketMaps;
 	private Element g;
@@ -27,12 +29,13 @@ public class Amf {
 		serverSocket = new ServerSocket(PORT);
 		socketMaps = new HashMap<>();
 
-		//TypeACurveGenerator pg = new TypeACurveGenerator(128, 512);
+		//TypeACurveGenerator pg = new TypeACurveGenerator(256, 1536);
 		//PairingParameters typeAParams = pg.generate();
 		PairingFactory.getInstance().setUsePBCWhenPossible(true);
 		//Pairing pairing = PairingFactory.getPairing(typeAParams);
 		Pairing pairing = PairingFactory.getPairing("a128.properties");
 
+		//logger.info(typeAParams.toString());
 		z = pairing.getZr();
 		g = z.newRandomElement().getImmutable();
 	}
@@ -119,6 +122,7 @@ public class Amf {
 		Element[][] Ap = { {z.newZeroElement().getImmutable(), z.newOneElement().getImmutable()},
 				{z.newOneElement().negate().getImmutable(), x.mul(2).getImmutable()}};
 		BigInteger bp = p.toBigInteger();
+		logger.info(String.format("length => %d", bp.bitLength()));
 
 		for(int i = bp.bitLength() - 1; i > 0; i--) {
 			Ap = matmul(Ap, Ap);

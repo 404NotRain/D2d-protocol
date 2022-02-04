@@ -1,10 +1,16 @@
 package xidian.sce.watchmen;
 
 import android.content.Context;
+import android.content.DialogInterface;
 import android.os.Bundle;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
+import android.widget.EditText;
 import android.widget.Spinner;
+import android.widget.Toast;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.common.io.BaseEncoding;
@@ -41,24 +47,24 @@ import xidian.sce.watchmen.logger.MessageOnlyLogFilter;
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
 
-    private static byte[] IDs = "SSSSSSSSSSSSSSSS".getBytes();
+    private static byte[] IDs = "SSSSSSSSSSSSSSSS".getBytes(); //ID of source UE
     private static byte[] IDr = "RRRRRRRRRRRRRRRR".getBytes();
     private static byte[] IDt = "TTTTTTTTTTTTTTTT".getBytes();
-    private static byte[] Kold = "oldkoldkoldkoldk".getBytes(); // shared key between source and target
-    private static byte[] Kold2 = "kdlokdlokdlokdlo".getBytes(); // shared key between relay and target
+    private static byte[] Kold = "oldkoldkoldkoldk".getBytes(); //shared key between source and target
+    private static byte[] Kold2 = "kdlokdlokdlokdlo".getBytes(); //shared key between relay and target
 
-    private static final String AMF_IP = "192.168.0.103";
-    private static final int AMF_PORT = 40000;
+    private static String AMF_IP = "192.168.0.101"; //the static IP of AMF(laptop) under the WLAN, you may want to modify it manually
+    private static final int AMF_PORT = 4000;
     private static Socket socket;
 
     private static Pairing pairing;
     private static Field z;
     private IvParameterSpec ivspec = new IvParameterSpec(new byte[16]);
-    private static Element us, ur, ut;
+    private static Element us, ur, ut; //Master key
 
     private Thread worker = null;
-    private int relayMode = 0, sourceMode = 0, targetMode = 0;
-    private String packetFile = "packet.txt";
+    private int relayMode = 0, sourceMode = 0, targetMode = 0; //change UE's behavior
+    private String packetFile = "packet.txt"; //save captured data for replay attack
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -78,9 +84,36 @@ public class MainActivity extends AppCompatActivity {
         ur = z.newRandomElement().getImmutable();
         ut = z.newRandomElement().getImmutable();*/
 
-        us = z.newElement(451354322).getImmutable();  //source's main key
+        us = z.newElement(451354322).getImmutable();
         ur = z.newElement(165486784).getImmutable();
         ut = z.newElement(165465798).getImmutable();
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.main, menu);
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (item.getItemId() == R.id.update_amf_ip) {
+            EditText editText = new EditText(MainActivity.this);
+            AlertDialog.Builder inputDialog = new AlertDialog.Builder(MainActivity.this);
+            inputDialog.setTitle("Update AMF's IP addr").setView(editText);
+            editText.setText(AMF_IP);
+            inputDialog.setPositiveButton("OK",
+                    new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            AMF_IP = editText.getText().toString();
+                            Toast.makeText(MainActivity.this, "update success!",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    }).show();
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
     }
 
     public void go(View v) {
@@ -150,10 +183,12 @@ public class MainActivity extends AppCompatActivity {
             int num;
             Element cvalue = z.newRandomElement().getImmutable(),
                     count, Tgn, n;
-            Log.i(TAG, "You are UEs");
+            long start, end;
+            double runtime = 0;
+            Log.i(TAG, "You are the source");
 
             byte[] t1 = new byte[16], t2 = new byte[16];
-            byte[] m = "hello,world!".getBytes(); //the plain message
+            byte[] m = "hello,world!".getBytes(); //12 byte plain message
             byte[] buffer = new byte[2048];
 
             try {
@@ -161,7 +196,7 @@ public class MainActivity extends AppCompatActivity {
                 socket = new Socket(AMF_IP, AMF_PORT);
                 OutputStream output = socket.getOutputStream();
                 InputStream input = socket.getInputStream();
-                output.write("S".getBytes());
+                output.write("S".getBytes()); //register in AMF
 
                 if( sourceMode == 1 ){
                     IDs = IDr;
@@ -169,7 +204,7 @@ public class MainActivity extends AppCompatActivity {
                     Kold = Kold2;
                 }
 
-                //long start = System.nanoTime();
+
                 new SecureRandom().nextBytes(t1);
                 output.write(Bytes.concat(IDs, IDt, t1));
 
@@ -178,16 +213,19 @@ public class MainActivity extends AppCompatActivity {
                     Log.i(TAG, "error => sid n Tg(n)");
                     return;
                 }
+                start = System.nanoTime();
                 byte[] sid = Arrays.copyOfRange(buffer, 0, 16);
                 n = z.newElementFromBytes(Arrays.copyOfRange(buffer, 16, 32)).getImmutable();
                 Tgn = z.newElementFromBytes(Arrays.copyOfRange(buffer, 32, 48)).getImmutable();
                 Element Tus_n = T(us, n);
+                end = System.nanoTime();
+                runtime += (end-start)/1e6;
 
                 output.write(Bytes.concat(sid, Tus_n.toBytes()));
                 Log.i(TAG,  "step1 finished");
 
                 //2. data transmit
-                long start = System.nanoTime();
+                start = System.nanoTime();
                 new SecureRandom().nextBytes(t2);
 
                 byte[] TID = byteArrayXor(IDs, IDt, 16);
@@ -228,13 +266,14 @@ public class MainActivity extends AppCompatActivity {
                     FileInputStream fis = openFileInput(packetFile);
                     //byte[] packet =   new byte[(int) fis.getChannel().size()];
                     fis.read(msg);
+                    Log.i(TAG, "Replay => msg is replaced with the previously captured packet");
                 }
 
                 Log.i(TAG,  "step2 finished ");
-                long end = System.nanoTime();
-                double t = (end-start)/1e6;
+                end = System.nanoTime();
+                runtime += (end-start)/1e6;
                 Log.i(TAG,  String.format("send cipher data => %s", BaseEncoding.base16().lowerCase().encode(msg)) );
-                Log.i(TAG, String.format("Source runtime => %sms", t));
+
 
                 DatagramSocket udp_socket = new DatagramSocket();
                 udp_socket.setBroadcast(true);
@@ -244,6 +283,8 @@ public class MainActivity extends AppCompatActivity {
 
                 //3. session confirm
                 num = input.read(buffer);
+
+                start = System.nanoTime();
                 if (num != 32) {
                     Log.i(TAG,  "error => sid delta_c)");
                     return;
@@ -253,13 +294,13 @@ public class MainActivity extends AppCompatActivity {
                 byte[] delta_c = mac.doFinal(sid);
 
                 if(!Arrays.equals(delta_c, delta_ct)) {
-                    Log.i(TAG,  "not matched delta_c");
+                    Log.i(TAG,  "error => not matched delta_c");
                     return;
                 }
                 Log.i(TAG,  "step3 finished");
-                //long end = System.nanoTime();
-                //double t = (end-start)/1e6;
-                //Log.i(String.format("Total time for protocol => %sms", t));
+                end = System.nanoTime();
+                runtime += (end-start)/1e6;
+                //Log.i(TAG, String.format("Source runtime => %sms", runtime));
 
             } catch (Exception e) {
                 Log.i(TAG,  e.toString());
@@ -275,7 +316,10 @@ public class MainActivity extends AppCompatActivity {
             byte[] buffer = new byte[2048];
             Element Tgn, n;
             DatagramSocket serverSocket = null;
-            Log.i(TAG,  "You are UER");
+
+            long start, end;
+            double runtime = 0;
+            Log.i(TAG,  "You are the relay");
 
             try {
                 //1. session config
@@ -289,6 +333,8 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 num = input.read(buffer);
+
+                start = System.nanoTime();
                 if (num != 48) {
                     Log.i(TAG,  "error => sid n Tg(n)");
                     return;
@@ -296,8 +342,9 @@ public class MainActivity extends AppCompatActivity {
                 byte[] sid = Arrays.copyOfRange(buffer, 0, 16);
                 n = z.newElementFromBytes(Arrays.copyOfRange(buffer, 16, 32)).getImmutable();
                 Tgn = z.newElementFromBytes(Arrays.copyOfRange(buffer, 32, 48)).getImmutable();
-
                 Element Tur_n = T(ur, n);
+                end = System.nanoTime();
+                runtime += (end - start)/1e6;
 
                 output.write(Bytes.concat(sid, Tur_n.toBytes()));
                 Log.i(TAG,  "step1 finished");
@@ -313,10 +360,11 @@ public class MainActivity extends AppCompatActivity {
                 if( relayMode == 2 ){
                     try (FileOutputStream fos = openFileOutput(packetFile, Context.MODE_PRIVATE)) {
                         fos.write(Arrays.copyOfRange(buffer, 0, packetLength));
+                        Log.i(TAG, "Replay => capture and save the data");
                     }
                 }
 
-                long start = System.nanoTime();
+                start = System.nanoTime();
                 byte[] sid_s = Arrays.copyOfRange(buffer, 0, 16);
                 byte[] TID_s = Arrays.copyOfRange(buffer, 16, 32);
                 byte[] CID_s = Arrays.copyOfRange(buffer, 32, 48);
@@ -331,10 +379,11 @@ public class MainActivity extends AppCompatActivity {
 
                 if( relayMode == 1 ){ // relay modify attack
                     data[0] = (byte)(data[0] ^ 1);
+                    Log.i(TAG, "Mitm => modify the first byte of data");
                 }
 
                 if(!Arrays.equals(sid, sid_s)) {
-                    Log.i(TAG,  "not matched sid");
+                    Log.i(TAG,  "error => \"sid is invalid\"");
                     return;
                 }
 
@@ -342,7 +391,7 @@ public class MainActivity extends AppCompatActivity {
                 mac.init(new SecretKeySpec(n.toBytes(), "RawBytes"));
                 byte[] delta_Ti = mac.doFinal(Arrays.copyOfRange(buffer, 0, packetLength - 16));
                 if(!Arrays.equals(delta_Ti, delta_Ts)) {
-                    Log.i(TAG,  "not matched delta t");
+                    Log.i(TAG,  "error => not matched delta_t");
                     return;
                 }
 
@@ -363,10 +412,10 @@ public class MainActivity extends AppCompatActivity {
                 byte[] msg = Bytes.concat(sid_s, TID_s, CID_s, count.toBytes(), data, R, delta_T);
 
                 Log.i(TAG,  "step2 finished");
-                long end = System.nanoTime();
-                double t = (end - start)/1e6;
+                end = System.nanoTime();
+                runtime += (end - start)/1e6;
                 Log.i(TAG,  String.format("resend cipher data => %s", BaseEncoding.base16().lowerCase().encode(msg)) );
-                Log.i(TAG, String.format("Relay runtime => %sms", t));
+                //Log.i(TAG, String.format("Relay runtime => %sms", runtime));
 
                 DatagramSocket udp_socket = new DatagramSocket();
                 udp_socket.setBroadcast(true);
@@ -391,7 +440,10 @@ public class MainActivity extends AppCompatActivity {
             byte[] buffer = new byte[2048];
             Element Tgn, n;
             DatagramSocket serverSocket = null;
-            Log.i(TAG,  "You are UEt");
+
+            long start, end;
+            double runtime = 0;
+            Log.i(TAG,  "You are the target");
 
             try {
                 //1. session config
@@ -406,6 +458,8 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 num = input.read(buffer);
+
+                start = System.nanoTime();
                 if (num != 80) {
                     Log.i(TAG,  "error => sid n Tg(n) IDs t1");
                     return;
@@ -416,6 +470,8 @@ public class MainActivity extends AppCompatActivity {
                 Tgn = z.newElementFromBytes(Arrays.copyOfRange(buffer, 32, 48)).getImmutable();
                 //byte[] IDs = Arrays.copyOfRange(buffer, 48, 64);
                 byte[] t1 = Arrays.copyOfRange(buffer, 64, 80);
+                end = System.nanoTime();
+                runtime += (end - start)/1e6;
                 Log.i(TAG,  "step1 finished");
 
 
@@ -427,7 +483,7 @@ public class MainActivity extends AppCompatActivity {
                 int packetLength = receivePacket.getLength();
                 Log.i(TAG,  String.format("Receive cipher data => %s", BaseEncoding.base16().lowerCase().encode(Arrays.copyOfRange(buffer, 0, packetLength))) );
 
-                long start = System.nanoTime();
+                start = System.nanoTime();
                 byte[] sid_s = Arrays.copyOfRange(buffer, 0, 16);
                 byte[] TID_s = Arrays.copyOfRange(buffer, 16, 32);
                 byte[] CID_s = Arrays.copyOfRange(buffer, 32, 48);
@@ -440,7 +496,7 @@ public class MainActivity extends AppCompatActivity {
                         packetLength);
 
                 if(!Arrays.equals(sid, sid_s)) {
-                    Log.i(TAG,  "not matched sid");
+                    Log.i(TAG,  "error => not matched sid");
                     return;
                 }
 
@@ -448,20 +504,20 @@ public class MainActivity extends AppCompatActivity {
                 mac.init(new SecretKeySpec(n.toBytes(), "RawBytes"));
                 byte[] delta_Tt = mac.doFinal(Arrays.copyOfRange(buffer, 0, packetLength - 16));
                 if(!Arrays.equals(delta_Tt, delta_Ts)) {
-                    Log.i(TAG,  "not matched delta t");
+                    Log.i(TAG,  "error => not matched delta_t");
                     return;
                 }
 
                 byte[] IDs_t = byteArrayXor(TID_s, IDt, 16);
                 IDs_t = byteArrayXor(IDs_t, n.toBytes(), 16);
                 if(!Arrays.equals(IDs_t, IDs)) {
-                    Log.i(TAG,  "not matched IDs");
+                    Log.i(TAG,  "error => not matched IDs");
                     return;
                 }
 
                 Element cvalue = z.newElementFromBytes(byteArrayXor(CID_s, IDs, 16));
                 if(! count.sub(cvalue).isEqual(z.newElement(R1_s.length / 48))) {
-                    Log.i(TAG,  "not matched track length");
+                    Log.i(TAG,  "error => not matched track length");
                     return;
                 }
 
@@ -469,7 +525,7 @@ public class MainActivity extends AppCompatActivity {
                 mac.init(new SecretKeySpec(Kold, "RawBytes"));
                 byte[] delta_mt = mac.doFinal(Bytes.concat(sid_s, TID_s, EM));
                 if(!Arrays.equals(delta_mt, Arrays.copyOfRange(data,  data.length-16, data.length))) {
-                    Log.i(TAG,  "not matched delta_m");
+                    Log.i(TAG,  "error => \"sigma_m is invalid\"");
                     return;
                 }
 
@@ -482,7 +538,7 @@ public class MainActivity extends AppCompatActivity {
                 //byte[] m_t = Arrays.copyOfRange(DM, 36, DM.length-16);
                 byte[] beta_t = Arrays.copyOfRange(DM, DM.length-16, DM.length);
                 if(!Arrays.equals(t1_t, t1)) {
-                    Log.i(TAG,  "not matched t1");
+                    Log.i(TAG,  "error => not matched t1");
                     return;
                 }
 
@@ -490,7 +546,7 @@ public class MainActivity extends AppCompatActivity {
                 cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Knew, "AES"), ivspec);
                 byte[] beta_tt =  cipher.doFinal(t2_t);
                 if(!Arrays.equals(beta_tt, beta_t)) {
-                    Log.i(TAG,  "not matched beta");
+                    Log.i(TAG,  "error => not matched beta");
                     return;
                 }
                 Log.i(TAG,  String.format("Knew => %s", BaseEncoding.base16().lowerCase().encode(Knew)) );
@@ -501,9 +557,9 @@ public class MainActivity extends AppCompatActivity {
                 byte[] delta_c = mac.doFinal(sid);
                 output.write(Bytes.concat(sid, delta_c, R1_s));
                 Log.i(TAG,  "step3 finished");
-                long end = System.nanoTime();
-                double t = (end - start)/1e6;
-                Log.i(TAG, String.format("Target runtime => %sms", t));
+                end = System.nanoTime();
+                runtime += (end - start)/1e6;
+               // Log.i(TAG, String.format("Target runtime => %sms", runtime));
 
             } catch (Exception e) {
                 Log.i(TAG,  e.toString());

@@ -1,15 +1,15 @@
 <resources>
-    <string name="app_name">Watchmen</string>
+    <string name="app_name">D2DWatchmen</string>
     <string name="prompt">
         Usage: Select the identity  from spinner, then press button \"GO!\" to execute the protocol. The identities include the following: \n
-        1.Source\n
-        2.Relay\n
-        3.Target\n
-        4.Mitm\n
-        5.Capture\n
-        6.ReplayS\n
-        7.ReplayR\n
-        8.ReplayT\n
-        9.Overhead
+        1.Source: the source UE in the normal scenario\n
+        2.Relay: the relay UE in the normal scenario\n
+        3.Target: the target UE in the normal scenario\n
+        4.Mitm: the relay UE which triggers a Mitm attack\n
+        5.Capture: the relay UE which captures and saves the data\n
+        6.ReplayS: the source UE in the replay attack scenario\n
+        7.ReplayR: the relay UE in the replay attack scenario\n
+        8.ReplayT: the target UE in the replay attack scenario\n
+        9.Overhead: benchmarking for computational overhead
     </string>
 </resources>

@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Watchmen(benchmark)</string>
+    <string name="prompt">
+        Usage: Select the identity  from spinner, then press button \"GO!\" to execute the protocol. The identities include the following: \n
+        1.Source: the source UE which runs 1000 times\n
+        2.Relay: the relay UE which runs 1000 times\n
+        3.Target: the target UE which runs 1000 times\n
+        4.Overhead: benchmarking for computational overhead
+    </string>
+</resources>

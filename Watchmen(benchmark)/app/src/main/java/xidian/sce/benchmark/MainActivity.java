@@ -1,0 +1,660 @@
+package xidian.sce.benchmark;
+
+import android.content.DialogInterface;
+import android.os.Bundle;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.View;
+import android.widget.EditText;
+import android.widget.Spinner;
+import android.widget.Toast;
+
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.google.common.io.BaseEncoding;
+import com.google.common.primitives.Bytes;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.math.BigInteger;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.security.SecureRandom;
+import java.util.Arrays;
+
+import javax.crypto.Cipher;
+import javax.crypto.Mac;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
+import it.unisa.dia.gas.jpbc.Element;
+import it.unisa.dia.gas.jpbc.Field;
+import it.unisa.dia.gas.jpbc.Pairing;
+import it.unisa.dia.gas.plaf.jpbc.pairing.PairingFactory;
+import xidian.sce.benchmark.logger.Log;
+import xidian.sce.benchmark.logger.LogFragment;
+import xidian.sce.benchmark.logger.LogWrapper;
+import xidian.sce.benchmark.logger.MessageOnlyLogFilter;
+
+
+public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "MainActivity";
+
+    private static byte[] IDs = "SSSSSSSSSSSSSSSS".getBytes(); //ID of source UE
+    private static byte[] IDr = "RRRRRRRRRRRRRRRR".getBytes();
+    private static byte[] IDt = "TTTTTTTTTTTTTTTT".getBytes();
+    private static byte[] Kold = "oldkoldkoldkoldk".getBytes(); //shared key between source and target
+
+    private static String AMF_IP = "192.168.0.102"; //the static IP of AMF(laptop) under the WLAN, you may want to modify it manually
+    private static final int AMF_PORT = 4000;
+    private static Socket socket;
+
+    private static Pairing pairing;
+    private static Field z;
+    private IvParameterSpec ivspec = new IvParameterSpec(new byte[16]);
+    private static Element us, ur, ut; //Master key
+
+    private Thread worker = null;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        initializeLogging();
+
+        //TypeACurveGenerator pg = new TypeACurveGenerator(128, 512);
+        //PairingParameters typeAParams = pg.generate();
+        //Pairing pairing = PairingFactory.getPairing(typeAParams);
+
+        PairingFactory.getInstance().setUsePBCWhenPossible(true);
+        pairing = PairingFactory.getPairing("assets/a128.properties");
+        z = pairing.getZr();
+
+        us = z.newRandomElement().getImmutable();
+        ur = z.newRandomElement().getImmutable();
+        ut = z.newRandomElement().getImmutable();
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.main, menu);
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (item.getItemId() == R.id.update_amf_ip) {
+            EditText editText = new EditText(MainActivity.this);
+            AlertDialog.Builder inputDialog = new AlertDialog.Builder(MainActivity.this);
+            inputDialog.setTitle("Update AMF's IP addr").setView(editText);
+            editText.setText(AMF_IP);
+            inputDialog.setPositiveButton("OK",
+                    new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            AMF_IP = editText.getText().toString();
+                            Toast.makeText(MainActivity.this, "update success!",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    }).show();
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+
+    public void go(View v) {
+        Spinner spinner = findViewById(R.id.spinner_identity);
+        String identity = spinner.getSelectedItem().toString();
+        getWorker(identity);
+        worker.start();
+    }
+
+    public void initializeLogging() {
+        LogWrapper logWrapper = new LogWrapper();
+        Log.setLogNode(logWrapper);
+
+        MessageOnlyLogFilter msgFilter = new MessageOnlyLogFilter();
+        logWrapper.setNext(msgFilter);
+
+        LogFragment logFragment = (LogFragment) getSupportFragmentManager()
+                .findFragmentById(R.id.log_fragment);
+        msgFilter.setNext(logFragment.getLogView());
+    }
+
+    public void getWorker(String identity) {
+        if(worker != null) {
+            worker.interrupt();
+        }
+        switch (identity) {
+            case "Source" :
+                worker = new SourceWorker();
+                break;
+            case "Relay":
+                worker = new RelayWorker();
+                break;
+            case "Target":
+                worker = new TargetWorker();
+                break;
+            case "Overhead":
+                worker = new OverheadWorker();
+                break;
+            default:
+                Log.d(TAG,"identity error");
+        }
+    }
+
+    class SourceWorker extends Thread {
+        static final String TAG = "SourceWorker";
+        public void run() {
+            int num;
+            Element cvalue = z.newRandomElement().getImmutable(),
+                    count, Tgn = null, n = null;
+            long start, end;
+            double runtime = 0;
+            Log.i(TAG, "You are the source");
+
+            byte[] t1 = new byte[16], t2 = new byte[16];
+            byte[] m = "hello,world!".getBytes(); //12 byte plain message
+            byte[] buffer = new byte[2048];
+
+            try {
+                //1. session config
+                socket = new Socket(AMF_IP, AMF_PORT);
+                OutputStream output = socket.getOutputStream();
+                InputStream input = socket.getInputStream();
+                output.write("S".getBytes()); //register in AMF
+
+                //long start_total = System.nanoTime();//total
+                new SecureRandom().nextBytes(t1);
+                output.write(Bytes.concat(IDs, IDt, t1));
+
+                num = input.read(buffer);
+                if (num != 48) {
+                    Log.i(TAG, "error => sid n Tg(n)");
+                    return;
+                }
+
+                byte[] sid = null;
+                Element Tus_n = null;
+                start = System.nanoTime();
+                for(int i = 0; i < 1000; i++) {
+                    sid = Arrays.copyOfRange(buffer, 0, 16);
+                    n = z.newElementFromBytes(Arrays.copyOfRange(buffer, 16, 32)).getImmutable();
+                    Tgn = z.newElementFromBytes(Arrays.copyOfRange(buffer, 32, 48)).getImmutable();
+                    Tus_n = T(us, n);
+                }
+                end = System.nanoTime();
+                runtime += (end-start)/1e6;
+                output.write(Bytes.concat(sid, Tus_n.toBytes()));
+                Log.i(TAG,  "step1 finished");
+
+                //2. data transmit
+                byte[] msg = null, Knew = null;
+                Mac mac = null;
+                start = System.nanoTime();
+                for(int i = 0; i < 1000; i++) {
+                    new SecureRandom().nextBytes(t2);
+
+                    byte[] TID = byteArrayXor(IDs, IDt, 16);
+                    TID = byteArrayXor(TID, n.toBytes(), 16);
+                    byte[] CID = byteArrayXor(IDs, cvalue.toBytes(), 16);
+                    count = cvalue.add(z.newOneElement().getImmutable());
+
+                    Knew = byteArrayXor(Kold, t2, 16);
+                    Cipher cipher = Cipher.getInstance("AES/CFB8/NoPadding");
+                    cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Knew, "AES"), ivspec);
+                    byte[] beta = cipher.doFinal(t2);
+                    //Log.i(TAG, String.format("Knew => %s", BaseEncoding.base16().lowerCase().encode(Knew)));
+
+                    byte[] TS = ByteBuffer.allocate(4).putInt((int) (System.currentTimeMillis() / 1000)).array();
+
+                    cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Kold, "AES"), ivspec);
+                    byte[] EM = cipher.doFinal(Bytes.concat(TS, t1, t2, m, beta));
+
+                    mac = Mac.getInstance("HmacMD5");
+                    mac.init(new SecretKeySpec(Kold, "RawBytes"));
+                    byte[] delta_m = mac.doFinal(Bytes.concat(sid, TID, EM));
+                    byte[] data = Bytes.concat(EM, delta_m);
+
+                    byte[] r1 = Tus_n.toBytes();
+                    Element Tus_tgn = T(us, Tgn);
+
+                    cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Tus_tgn.toBytes(), "AES"), ivspec);
+                    byte[] e1 = cipher.doFinal(t1);
+                    mac.init(new SecretKeySpec(Tus_tgn.toBytes(), "RawBytes"));
+                    byte[] delta_1 = mac.doFinal(Bytes.concat(r1, e1));
+                    byte[] R1 = Bytes.concat(r1, e1, delta_1);
+
+                    mac.init(new SecretKeySpec(n.toBytes(), "RawBytes"));
+                    byte[] delta_T = mac.doFinal((Bytes.concat(sid, TID, CID, count.toBytes(), data, R1)));
+                    msg = Bytes.concat(sid, TID, CID, count.toBytes(), data, R1, delta_T);
+                }
+                sleep(4000);
+                Log.i(TAG,  "step2 finished ");
+                end = System.nanoTime();
+                runtime += (end-start)/1e6;
+                Log.i(TAG,  String.format("send cipher data => %s", BaseEncoding.base16().lowerCase().encode(msg)) );
+
+
+                DatagramSocket udp_socket = new DatagramSocket();
+                udp_socket.setBroadcast(true);
+                for(int i = 0; i < 1000; i++)
+                    udp_socket.send(new DatagramPacket(msg, msg.length, InetAddress.getByName("255.255.255.255"), 4001));
+
+
+                //3. session confirm
+                num = input.read(buffer);
+                start = System.nanoTime();
+                for(int i = 0; i < 1000; i++) {
+                    if (num != 32) {
+                        Log.i(TAG, "error => sid delta_c)");
+                        return;
+                    }
+                    byte[] delta_ct = Arrays.copyOfRange(buffer, 16, 32);
+                    mac.init(new SecretKeySpec(Knew, "RawBytes"));
+                    byte[] delta_c = mac.doFinal(sid);
+
+                    if (!Arrays.equals(delta_c, delta_ct)) {
+                        Log.i(TAG, "error => not matched delta_c");
+                        return;
+                    }
+                }
+                Log.i(TAG,  "step3 finished");
+                end = System.nanoTime();
+                runtime += (end-start)/1e6;
+                Log.i(TAG, String.format("Source runtime => %sms", runtime/1000));
+
+                //Log.i(TAG, String.format("Source total runtime => %sms", (end - start_total)/1e6));//total time
+            } catch (Exception e) {
+                Log.i(TAG,  e.toString());
+                return;
+            }
+        }
+    }
+
+    class RelayWorker extends Thread {
+        static final String TAG = "RelayWorker";
+        public void run() {
+            int num;
+            byte[] buffer = new byte[2048];
+            Element Tgn = null, n = null;
+            DatagramSocket serverSocket = null;
+
+            long start, end;
+            double runtime = 0;
+            Log.i(TAG,  "You are the relay");
+
+            try {
+                //1. session config
+                socket = new Socket(AMF_IP, AMF_PORT);
+                OutputStream output = socket.getOutputStream();
+                InputStream input = socket.getInputStream();
+                output.write("R".getBytes());
+
+                num = input.read(buffer);
+
+                byte[] sid = null;
+                Element Tur_n = null;
+                start = System.nanoTime();
+                for(int i = 0; i < 1000; i++) {
+                    if (num != 48) {
+                        Log.i(TAG, "error => sid n Tg(n)");
+                        return;
+                    }
+                    sid = Arrays.copyOfRange(buffer, 0, 16);
+                    n = z.newElementFromBytes(Arrays.copyOfRange(buffer, 16, 32)).getImmutable();
+                    Tgn = z.newElementFromBytes(Arrays.copyOfRange(buffer, 32, 48)).getImmutable();
+                    Tur_n = T(ur, n);
+                }
+                end = System.nanoTime();
+                runtime += (end-start)/1e6;
+
+                output.write(Bytes.concat(sid, Tur_n.toBytes()));
+                Log.i(TAG,  "step1 finished");
+
+                //2. data transmit
+                serverSocket = new DatagramSocket(4001);
+                serverSocket.setSoTimeout(8000);
+                DatagramPacket receivePacket = new DatagramPacket(buffer,buffer.length);
+                serverSocket.receive(receivePacket);
+                int packetLength = receivePacket.getLength();
+                Log.i(TAG,  String.format("Receive cipher data => %s", BaseEncoding.base16().lowerCase().encode(Arrays.copyOfRange(buffer, 0, packetLength))) );
+
+
+                byte[] msg = null;
+                start = System.nanoTime();
+                for(int i = 0; i < 1000; i++) {
+                    byte[] sid_s = Arrays.copyOfRange(buffer, 0, 16);
+                    byte[] TID_s = Arrays.copyOfRange(buffer, 16, 32);
+                    byte[] CID_s = Arrays.copyOfRange(buffer, 32, 48);
+                    Element count = z.newElementFromBytes(Arrays.copyOfRange(buffer, 48, 64));
+                    count.add(z.newOneElement());
+
+                    byte[] data = Arrays.copyOfRange(buffer, 64, packetLength - 64);
+                    byte[] R1_s = Arrays.copyOfRange(buffer, packetLength - 64,
+                            packetLength - 16);
+                    byte[] delta_Ts = Arrays.copyOfRange(buffer, packetLength - 16,
+                            packetLength);
+
+                    if (!Arrays.equals(sid, sid_s)) {
+                        Log.i(TAG, "error => not matched sid");
+                        return;
+                    }
+
+                    Mac mac = Mac.getInstance("HmacMD5");
+                    mac.init(new SecretKeySpec(n.toBytes(), "RawBytes"));
+                    byte[] delta_Ti = mac.doFinal(Arrays.copyOfRange(buffer, 0, packetLength - 16));
+                    if (!Arrays.equals(delta_Ti, delta_Ts)) {
+                        Log.i(TAG, "error => not matched delta_t");
+                        return;
+                    }
+
+
+                    byte[] r2 = Tur_n.toBytes();
+                    Cipher cipher = Cipher.getInstance("AES/CFB8/NoPadding");
+                    Element Tur_tgn = T(ur, Tgn);
+
+                    cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Tur_tgn.toBytes(), "AES"), ivspec);
+                    byte[] e2 = cipher.doFinal(Arrays.copyOfRange(R1_s, 16, 32));
+                    mac.init(new SecretKeySpec(Tur_tgn.toBytes(), "RawBytes"));
+                    byte[] delta_2 = mac.doFinal(Bytes.concat(r2, e2));
+                    byte[] R2 = Bytes.concat(r2, e2, delta_2);
+
+                    byte[] R = Bytes.concat(R1_s, R2);
+                    mac.init(new SecretKeySpec(n.toBytes(), "RawBytes"));
+                    byte[] delta_T = mac.doFinal((Bytes.concat(sid_s, TID_s, CID_s, count.toBytes(), data, R)));
+                    msg = Bytes.concat(sid_s, TID_s, CID_s, count.toBytes(), data, R, delta_T);
+                }
+
+                Log.i(TAG,  "step2 finished");
+                end = System.nanoTime();
+                runtime += (end - start)/1e6;
+                Log.i(TAG,  String.format("resend cipher data => %s", BaseEncoding.base16().lowerCase().encode(msg)) );
+                Log.i(TAG, String.format("Relay runtime => %sms", runtime/1000));
+
+                DatagramSocket udp_socket = new DatagramSocket();
+                udp_socket.setBroadcast(true);
+                for(int i = 0; i < 1000; i++)
+                    udp_socket.send(new DatagramPacket(msg, msg.length, InetAddress.getByName("255.255.255.255"), 4002));
+
+            } catch (Exception e) {
+                Log.i(TAG,  e.toString());
+            }
+            finally {
+                if(serverSocket != null) {
+                    serverSocket.close();
+                }
+            }
+        }
+    }
+
+    class TargetWorker extends Thread {
+        static final String TAG = "TargetWorker";
+        public void run() {
+            int num;
+            byte[] buffer = new byte[2048];
+            Element Tgn, n = null;
+            DatagramSocket serverSocket = null;
+
+            long start, end;
+            double runtime = 0;
+            Log.i(TAG,  "You are the target");
+
+            try {
+                //1. session config
+                socket = new Socket(AMF_IP, AMF_PORT);
+                OutputStream output = socket.getOutputStream();
+                InputStream input = socket.getInputStream();
+                output.write("T".getBytes());
+
+                num = input.read(buffer);
+
+                byte[] sid = null, t1 = null;
+                Element Tur_n = null;
+                start = System.nanoTime();
+                for(int i = 0; i < 1000; i++) {
+                    if (num != 80) {
+                        Log.i(TAG, "error => sid n Tg(n) IDs t1");
+                        return;
+                    }
+                    sid = Arrays.copyOfRange(buffer, 0, 16);
+                    n = z.newElementFromBytes(Arrays.copyOfRange(buffer, 16, 32)).getImmutable();
+                    Tgn = z.newElementFromBytes(Arrays.copyOfRange(buffer, 32, 48)).getImmutable();
+                    //byte[] IDs = Arrays.copyOfRange(buffer, 48, 64);
+                    t1 = Arrays.copyOfRange(buffer, 64, 80);
+                }
+                end = System.nanoTime();
+                runtime += (end - start)/1e6;
+                Log.i(TAG,  "step1 finished");
+
+
+                //2. data transmit
+                serverSocket = new DatagramSocket(4002);
+                serverSocket.setSoTimeout(80000);
+                DatagramPacket receivePacket = new DatagramPacket(buffer,buffer.length);
+                serverSocket.receive(receivePacket);
+                int packetLength = receivePacket.getLength();
+                Log.i(TAG,  String.format("Receive cipher data => %s", BaseEncoding.base16().lowerCase().encode(Arrays.copyOfRange(buffer, 0, packetLength))) );
+
+                byte[] delta_c = null,R1_s = null;
+                start = System.nanoTime();
+                for(int i = 0; i < 1000; i++) {
+                    byte[] sid_s = Arrays.copyOfRange(buffer, 0, 16);
+                    byte[] TID_s = Arrays.copyOfRange(buffer, 16, 32);
+                    byte[] CID_s = Arrays.copyOfRange(buffer, 32, 48);
+                    Element count = z.newElementFromBytes(Arrays.copyOfRange(buffer, 48, 64));
+
+                    byte[] data = Arrays.copyOfRange(buffer, 64, packetLength - 112);
+                    R1_s = Arrays.copyOfRange(buffer, packetLength - 112,
+                            packetLength - 16);
+                    byte[] delta_Ts = Arrays.copyOfRange(buffer, packetLength - 16,
+                            packetLength);
+
+                    if (!Arrays.equals(sid, sid_s)) {
+                        Log.i(TAG, "error => not matched sid");
+                        return;
+                    }
+
+                    Mac mac = Mac.getInstance("HmacMD5");
+                    mac.init(new SecretKeySpec(n.toBytes(), "RawBytes"));
+                    byte[] delta_Tt = mac.doFinal(Arrays.copyOfRange(buffer, 0, packetLength - 16));
+                    if (!Arrays.equals(delta_Tt, delta_Ts)) {
+                        Log.i(TAG, "error => not matched delta_t");
+                        return;
+                    }
+
+                    byte[] IDs_t = byteArrayXor(TID_s, IDt, 16);
+                    IDs_t = byteArrayXor(IDs_t, n.toBytes(), 16);
+                    if (!Arrays.equals(IDs_t, IDs)) {
+                        Log.i(TAG, "error => not matched IDs");
+                        return;
+                    }
+
+                    Element cvalue = z.newElementFromBytes(byteArrayXor(CID_s, IDs, 16));
+                    if (!count.sub(cvalue).isEqual(z.newElement(R1_s.length / 48))) {
+                        Log.i(TAG, "error => not matched track length");
+                        return;
+                    }
+
+                    byte[] EM = Arrays.copyOfRange(data, 0, data.length - 16);
+                    mac.init(new SecretKeySpec(Kold, "RawBytes"));
+                    byte[] delta_mt = mac.doFinal(Bytes.concat(sid_s, TID_s, EM));
+                    if (!Arrays.equals(delta_mt, Arrays.copyOfRange(data, data.length - 16, data.length))) {
+                        Log.i(TAG, "error => not matched delta_m");
+                        return;
+                    }
+
+                    Cipher cipher = Cipher.getInstance("AES/CFB8/NoPadding");
+                    cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(Kold, "AES"), ivspec);
+                    byte[] DM = cipher.doFinal(EM);
+                    byte[] TS_t = Arrays.copyOfRange(DM, 0, 4);
+                    byte[] t1_t = Arrays.copyOfRange(DM, 4, 20);
+                    byte[] t2_t = Arrays.copyOfRange(DM, 20, 36);
+                    //byte[] m_t = Arrays.copyOfRange(DM, 36, DM.length-16);
+                    byte[] beta_t = Arrays.copyOfRange(DM, DM.length - 16, DM.length);
+                    if (!Arrays.equals(t1_t, t1)) {
+                        Log.i(TAG, "error => not matched t1");
+                        return;
+                    }
+
+                    byte[] Knew = byteArrayXor(Kold, t2_t, 16);
+                    cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Knew, "AES"), ivspec);
+                    byte[] beta_tt = cipher.doFinal(t2_t);
+                    if (!Arrays.equals(beta_tt, beta_t)) {
+                        Log.i(TAG, "error => not matched beta");
+                        return;
+                    }
+                    //Log.i(TAG, String.format("Knew => %s", BaseEncoding.base16().lowerCase().encode(Knew)));
+                    //Log.i(TAG, "step2 finished");
+
+                    //3. session confirm
+                    mac.init(new SecretKeySpec(Knew, "RawBytes"));
+                    delta_c = mac.doFinal(sid);
+                }
+                Log.i(TAG,  "step3 finished");
+                end = System.nanoTime();
+                runtime += (end - start)/1e6;
+                Log.i(TAG, String.format("Target runtime => %sms", runtime/1000));
+
+                output.write(Bytes.concat(sid, delta_c, R1_s));
+
+            } catch (Exception e) {
+                Log.i(TAG,  e.toString());
+            }
+            finally {
+                if(serverSocket != null) {
+                    serverSocket.close();
+                }
+            }
+        }
+    }
+
+    class OverheadWorker extends Thread  {
+        static final String TAG = "OverheadWorker";
+
+        public void run() {
+            int i, times = 1000;
+            long start, end;
+            double t;
+
+            byte[] IK = new byte[16];
+            byte[] CK = new byte[16];
+            byte[] plain = new byte[160];
+            (new SecureRandom()).nextBytes(IK);
+            (new SecureRandom()).nextBytes(CK);
+            (new SecureRandom()).nextBytes(plain);
+
+            Element x = pairing.getG1().newRandomElement().getImmutable(),
+                    y = pairing.getG2().newRandomElement().getImmutable();
+            start = System.nanoTime();
+            for (i = 0; i < times; i++) {
+                pairing.pairing(x, y);
+            }
+            end = System.nanoTime();
+            t = (end - start) / 1e6 / times;
+            Log.i(TAG, String.format("Average pairing time => %sms", t));
+
+            Element p = z.newRandomElement();
+            Element n = z.newRandomElement();
+            start = System.nanoTime();
+            for (i = 0; i < times; i++) {
+                T(p, n);
+            }
+            end = System.nanoTime();
+            t = (end - start) / 1e6 / times;
+            Log.i(TAG, String.format("Average chebychef time => %sms", t));
+
+            x = pairing.getG1().newRandomElement().getImmutable();
+            BigInteger y1 = pairing.getZr().newRandomElement().toBigInteger();
+            start = System.nanoTime();
+            for (i = 0; i < times; i++) {
+                x.mul(y1);
+            }
+            end = System.nanoTime();
+            t = (end - start) / 1e6 / times;
+            Log.i(TAG, String.format("Average mul time => %sms", t));
+
+            x = pairing.getGT().newRandomElement().getImmutable();
+            y = z.newRandomElement().getImmutable();
+            start = System.nanoTime();
+            for (i = 0; i < times; i++) {
+                x.powZn(y);
+            }
+            end = System.nanoTime();
+            t = (end - start) / 1e6 / times;
+            Log.i(TAG, String.format("Average exp time => %sms", t));
+
+            start = System.nanoTime();
+            for (i = 0; i < times; i++) {
+                z.newElementFromHash(plain, 0, 16);
+            }
+            end = System.nanoTime();
+            t = (end - start) / 1e6 / times;
+            Log.i(TAG, String.format("Average hash time => %sms", t));
+
+            try {
+                Mac mac = Mac.getInstance("HmacMD5");
+                mac.init(new SecretKeySpec(IK, "RawBytes"));
+                start = System.nanoTime();
+                for (i = 0; i < times; i++) {
+                    mac.doFinal(plain);
+                }
+                end = System.nanoTime();
+                t = (end - start) / 1e6 / times;
+                Log.i(TAG, String.format("Average hmac time => %sms", t));
+
+
+                Cipher cipher = Cipher.getInstance("AES/CFB8/NoPadding");
+                cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(CK, "AES"), ivspec);
+                start = System.nanoTime();
+                for (i = 0; i < times; i++) {
+                    cipher.doFinal(plain);
+                }
+                end = System.nanoTime();
+                t = (end - start) / 1e6 / times;
+                Log.i(TAG, String.format("Average encrypt time => %sms", t));
+            } catch (Exception e) {
+                Log.i(TAG, e.toString());
+            }
+        }
+    }
+
+    private Element T(Element p, Element x) {
+        Element[][] A =  { {z.newZeroElement().getImmutable(), z.newOneElement().getImmutable()},
+                {z.newOneElement().negate().getImmutable(), x.mul(2).getImmutable()}};
+        Element[][] Ap = { {z.newZeroElement().getImmutable(), z.newOneElement().getImmutable()},
+                {z.newOneElement().negate().getImmutable(), x.mul(2).getImmutable()}};
+        BigInteger bp = p.toBigInteger();
+
+        for(int i = bp.bitLength() - 1; i > 0; i--) {
+            Ap = matmul(Ap, Ap);
+            if(bp.testBit(i-1)) {
+                Ap = matmul(Ap, A);
+            }
+        }
+        return Ap[0][0].mul(z.newOneElement()).add(Ap[0][1].mul(x));
+    }
+
+    private static Element[][] matmul(Element[][] m1, Element[][] m2) {
+        Element[][] result = new Element[2][2];
+        for(int i = 0; i < 2; i++)
+            for(int j = 0; j < 2; j++){
+                result[i][j] = m1[i][0].mul(m2[0][j]).add(m1[i][1].mul(m2[1][j]));
+            }
+        return result;
+    }
+
+    private byte[] byteArrayXor(byte[] a1, byte[] a2, int len) {
+        byte[] result = new byte[len];
+        for(int i = 0; i < len; i++) {
+            result[i] = (byte) (a1[i] ^ a2[i]);
+        }
+        return result;
+    }
+
+}
+

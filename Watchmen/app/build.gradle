@@ -5,7 +5,7 @@ android {
     buildToolsVersion "29.0.3"
 
     defaultConfig {
-        applicationId "xidian.sce.wland2d"
+        applicationId "xidian.sce.watchmen"
         minSdkVersion 24
         targetSdkVersion 30
         versionCode 1
